@@ -48,6 +48,7 @@ static const CGFloat kIconSize = 18.0;
     // Build menu
     NSMenu *menu = [[NSMenu alloc] init];
     menu.delegate = self;
+    menu.autoenablesItems = NO;
 
     // Status display
     self.statusMenuItem = [[NSMenuItem alloc] initWithTitle:@"Ready"
@@ -59,10 +60,8 @@ static const CGFloat kIconSize = 18.0;
     [menu addItem:[NSMenuItem separatorItem]];
 
     // Statistics section
-    NSMenuItem *statsHeader = [[NSMenuItem alloc] initWithTitle:@"Statistics"
-                                                        action:nil
-                                                 keyEquivalent:@""];
-    statsHeader.enabled = NO;
+    NSMenuItem *statsHeader = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
+    statsHeader.view = [self headerViewWithTitle:@"Statistics"];
     [menu addItem:statsHeader];
 
     self.statsCountItem = [[NSMenuItem alloc] initWithTitle:@"  ..."
@@ -86,10 +85,8 @@ static const CGFloat kIconSize = 18.0;
     [menu addItem:[NSMenuItem separatorItem]];
 
     // Permissions section
-    NSMenuItem *permHeader = [[NSMenuItem alloc] initWithTitle:@"Permissions"
-                                                       action:nil
-                                                keyEquivalent:@""];
-    permHeader.enabled = NO;
+    NSMenuItem *permHeader = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
+    permHeader.view = [self headerViewWithTitle:@"Permissions"];
     [menu addItem:permHeader];
 
     self.micPermissionItem = [[NSMenuItem alloc] initWithTitle:@"  Microphone: Checking..."
@@ -207,6 +204,21 @@ static const CGFloat kIconSize = 18.0;
     }
 }
 
+#pragma mark - Helpers
+
+- (NSView *)headerViewWithTitle:(NSString *)text {
+    NSTextField *label = [NSTextField labelWithString:text];
+    label.font = [NSFont boldSystemFontOfSize:[NSFont systemFontSize]];
+    label.textColor = [NSColor labelColor];
+    [label sizeToFit];
+
+    // Match standard menu item padding
+    NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 200, label.frame.size.height + 4)];
+    label.frame = NSMakeRect(20, 2, label.frame.size.width, label.frame.size.height);
+    [container addSubview:label];
+    return container;
+}
+
 #pragma mark - Custom Icon Drawing
 
 /// Create a template image drawn with the given block. Template images auto-adapt to dark/light mode.
@@ -220,17 +232,17 @@ static const CGFloat kIconSize = 18.0;
     return image;
 }
 
-/// Idle: three static waveform bars — a calm, minimal audio visualizer
+/// Idle: five static waveform bars — a calm, resting audio visualizer matching recording style
 - (void)applyIdleIcon {
     NSImage *icon = [self templateImageWithDrawing:^(NSSize size) {
         CGFloat barWidth = 2.0;
-        CGFloat spacing = 3.5;
+        CGFloat spacing = 2.5;
         CGFloat centerX = size.width / 2.0;
         CGFloat centerY = size.height / 2.0;
 
-        // Heights for 3 bars (short, tall, short) — symmetric, resting state
-        CGFloat heights[] = {5.0, 8.0, 5.0};
-        NSInteger barCount = 3;
+        // Heights for 5 bars — symmetric resting state (short, medium, tall, medium, short)
+        CGFloat heights[] = {4.0, 7.0, 11.0, 7.0, 4.0};
+        NSInteger barCount = 5;
         CGFloat totalWidth = barCount * barWidth + (barCount - 1) * spacing;
         CGFloat startX = centerX - totalWidth / 2.0;
 
