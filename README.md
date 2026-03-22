@@ -26,6 +26,10 @@ Koe takes a different approach:
 
 ## Installation
 
+Koe currently supports **Apple Silicon Macs only**. The prebuilt binaries and
+current build configuration target `aarch64-apple-darwin`, so `x86_64` Intel
+Macs are not supported.
+
 ### Homebrew
 
 ```bash
@@ -33,11 +37,18 @@ brew tap owo-network/brew
 brew install owo-network/brew/koe
 ```
 
+### Release
+
+You can also download the latest release directly from GitHub:
+
+- [Download the latest release](https://github.com/missuo/koe/releases/latest)
+
 ### Build from Source
 
 #### Prerequisites
 
 - macOS 13.0+
+- Apple Silicon Mac (`aarch64-apple-darwin`)
 - Rust toolchain (`rustup`)
 - Xcode with command line tools
 - [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
