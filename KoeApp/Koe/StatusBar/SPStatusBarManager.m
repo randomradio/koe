@@ -123,6 +123,12 @@ static const CGFloat kIconSize = 18.0;
     openConfig.target = self;
     [menu addItem:openConfig];
 
+    NSMenuItem *openLogs = [[NSMenuItem alloc] initWithTitle:@"Open Log Folder..."
+                                                     action:@selector(openLogFolder:)
+                                              keyEquivalent:@""];
+    openLogs.target = self;
+    [menu addItem:openLogs];
+
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *loginItem = [[NSMenuItem alloc] initWithTitle:@"Launch at Login"
@@ -455,6 +461,15 @@ static const CGFloat kIconSize = 18.0;
 
 - (void)openConfigFolder:(id)sender {
     NSString *path = [NSString stringWithFormat:@"%@/.koe", NSHomeDirectory()];
+    [[NSFileManager defaultManager] createDirectoryAtPath:path
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:path]];
+}
+
+- (void)openLogFolder:(id)sender {
+    NSString *path = [NSString stringWithFormat:@"%@/.koe/logs", NSHomeDirectory()];
     [[NSFileManager defaultManager] createDirectoryAtPath:path
                               withIntermediateDirectories:YES
                                                attributes:nil

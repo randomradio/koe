@@ -1,4 +1,12 @@
+use crate::ffi::invoke_log_event;
+use log::{Level, LevelFilter, Log, Metadata, Record};
+use std::env;
+use std::fs::{create_dir_all, File, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Mutex, Once, OnceLock};
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Metrics collected for each session.
 pub struct SessionMetrics {
@@ -71,8 +79,98 @@ impl SessionMetrics {
     }
 }
 
+struct KoeLogger {
+    level: LevelFilter,
+    file: Option<Mutex<File>>,
+}
+
+impl KoeLogger {
+    fn new(level: LevelFilter) -> Self {
+        Self {
+            level,
+            file: open_log_file().map(Mutex::new),
+        }
+    }
+}
+
+impl Log for KoeLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= self.level
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!("[{ts_ms}] [{}] {}\n", record.level(), record.args());
+
+        eprint!("{line}");
+
+        if let Some(file) = &self.file {
+            if let Ok(mut handle) = file.lock() {
+                let _ = handle.write_all(line.as_bytes());
+                let _ = handle.flush();
+            }
+        }
+
+        invoke_log_event(level_to_ffi(record.level()), line.trim_end());
+    }
+
+    fn flush(&self) {
+        if let Some(file) = &self.file {
+            if let Ok(mut handle) = file.lock() {
+                let _ = handle.flush();
+            }
+        }
+    }
+}
+
+fn level_to_ffi(level: Level) -> i32 {
+    match level {
+        Level::Error => 0,
+        Level::Warn => 1,
+        Level::Info => 2,
+        Level::Debug | Level::Trace => 3,
+    }
+}
+
+fn open_log_file() -> Option<File> {
+    let home = env::var_os("HOME")?;
+    let mut dir = PathBuf::from(home);
+    dir.push(".koe");
+    dir.push("logs");
+
+    if let Err(e) = create_dir_all(&dir) {
+        eprintln!("[Koe] failed to create log directory {}: {e}", dir.display());
+        return None;
+    }
+
+    let mut file_path = dir;
+    file_path.push("koe.log");
+
+    match OpenOptions::new().create(true).append(true).open(&file_path) {
+        Ok(file) => Some(file),
+        Err(e) => {
+            eprintln!("[Koe] failed to open log file {}: {e}", file_path.display());
+            None
+        }
+    }
+}
+
 pub fn init_logging() {
-    let _ = env_logger::builder()
-        .filter_level(log::LevelFilter::Info)
-        .try_init();
+    static INIT: Once = Once::new();
+    static LOGGER: OnceLock<KoeLogger> = OnceLock::new();
+
+    INIT.call_once(|| {
+        let _ = LOGGER.set(KoeLogger::new(LevelFilter::Info));
+        if let Some(logger) = LOGGER.get() {
+            let _ = log::set_logger(logger);
+            log::set_max_level(LevelFilter::Info);
+        }
+    });
 }
