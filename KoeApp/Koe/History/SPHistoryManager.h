@@ -16,6 +16,15 @@
 - (void)recordSessionWithDurationMs:(NSInteger)durationMs
                                text:(NSString *)text;
 
+- (void)recordUncertainPhrases:(NSArray<NSDictionary *> *)phrases;
+
+- (NSArray<NSDictionary *> *)pendingUncertainPhrasesWithLimit:(NSInteger)limit;
+
+- (void)resolveUncertainPhraseWithId:(NSInteger)phraseId
+                      correctedPhrase:(NSString *)correctedPhrase;
+
+- (void)ignoreUncertainPhraseWithId:(NSInteger)phraseId;
+
 - (SPHistoryStats *)aggregateStats;
 
 @end

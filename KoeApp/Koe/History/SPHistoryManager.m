@@ -57,15 +57,45 @@
         NSLog(@"[Koe] Failed to create sessions table: %s", errMsg);
         sqlite3_free(errMsg);
     }
+
+    const char *uncertainSql =
+        "CREATE TABLE IF NOT EXISTS uncertain_phrases ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  timestamp INTEGER NOT NULL,"
+        "  session_id TEXT,"
+        "  phrase TEXT NOT NULL,"
+        "  suggestion TEXT,"
+        "  reason TEXT,"
+        "  confidence REAL,"
+        "  context_text TEXT,"
+        "  status TEXT NOT NULL DEFAULT 'new',"
+        "  corrected_phrase TEXT"
+        ");";
+
+    errMsg = NULL;
+    if (sqlite3_exec(_db, uncertainSql, NULL, NULL, &errMsg) != SQLITE_OK) {
+        NSLog(@"[Koe] Failed to create uncertain_phrases table: %s", errMsg);
+        sqlite3_free(errMsg);
+    }
+
+    const char *indexSql =
+        "CREATE INDEX IF NOT EXISTS idx_uncertain_phrases_status_timestamp "
+        "ON uncertain_phrases(status, timestamp DESC);";
+    errMsg = NULL;
+    if (sqlite3_exec(_db, indexSql, NULL, NULL, &errMsg) != SQLITE_OK) {
+        NSLog(@"[Koe] Failed to create uncertain_phrases index: %s", errMsg);
+        sqlite3_free(errMsg);
+    }
 }
 
 - (void)recordSessionWithDurationMs:(NSInteger)durationMs
                                text:(NSString *)text {
-    if (!_db || text.length == 0) return;
+    if (!_db) return;
+    NSString *safeText = text ?: @"";
 
     NSInteger charCount = 0;
     NSInteger wordCount = 0;
-    [self countText:text charCount:&charCount wordCount:&wordCount];
+    [self countText:safeText charCount:&charCount wordCount:&wordCount];
 
     const char *sql = "INSERT INTO sessions (timestamp, duration_ms, text, char_count, word_count) "
                       "VALUES (?, ?, ?, ?, ?);";
@@ -74,7 +104,7 @@
     if (sqlite3_prepare_v2(_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, (sqlite3_int64)[[NSDate date] timeIntervalSince1970]);
         sqlite3_bind_int64(stmt, 2, (sqlite3_int64)durationMs);
-        sqlite3_bind_text(stmt, 3, text.UTF8String, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, safeText.UTF8String, -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 4, (sqlite3_int64)charCount);
         sqlite3_bind_int64(stmt, 5, (sqlite3_int64)wordCount);
 
@@ -86,6 +116,166 @@
 
     NSLog(@"[Koe] History recorded — duration:%ldms chars:%ld words:%ld",
           (long)durationMs, (long)charCount, (long)wordCount);
+}
+
+- (void)recordUncertainPhrases:(NSArray<NSDictionary *> *)phrases {
+    if (!_db || phrases.count == 0) return;
+
+    const char *sql =
+        "INSERT INTO uncertain_phrases ("
+        "  timestamp, session_id, phrase, suggestion, reason, confidence, context_text, status"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(_db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        NSLog(@"[Koe] Failed to prepare uncertain phrase insert: %s", sqlite3_errmsg(_db));
+        return;
+    }
+
+    NSInteger inserted = 0;
+    for (NSDictionary *item in phrases) {
+        NSString *phrase = [item[@"phrase"] isKindOfClass:[NSString class]] ? item[@"phrase"] : @"";
+        phrase = [phrase stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (phrase.length == 0) continue;
+
+        NSString *sessionId = [item[@"session_id"] isKindOfClass:[NSString class]] ? item[@"session_id"] : nil;
+        NSString *suggestion = [item[@"suggestion"] isKindOfClass:[NSString class]] ? item[@"suggestion"] : @"";
+        NSString *reason = [item[@"reason"] isKindOfClass:[NSString class]] ? item[@"reason"] : @"";
+        NSString *contextText = [item[@"context_text"] isKindOfClass:[NSString class]] ? item[@"context_text"] : @"";
+
+        double confidence = 0.5;
+        id confidenceValue = item[@"confidence"];
+        if ([confidenceValue isKindOfClass:[NSNumber class]]) {
+            confidence = [confidenceValue doubleValue];
+        } else if ([confidenceValue isKindOfClass:[NSString class]]) {
+            confidence = [confidenceValue doubleValue];
+        }
+        if (confidence < 0.0) confidence = 0.0;
+        if (confidence > 1.0) confidence = 1.0;
+
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+
+        sqlite3_bind_int64(stmt, 1, (sqlite3_int64)[[NSDate date] timeIntervalSince1970]);
+        if (sessionId.length > 0) {
+            sqlite3_bind_text(stmt, 2, sessionId.UTF8String, -1, SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_null(stmt, 2);
+        }
+        sqlite3_bind_text(stmt, 3, phrase.UTF8String, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, suggestion.UTF8String, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, reason.UTF8String, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 6, confidence);
+        sqlite3_bind_text(stmt, 7, contextText.UTF8String, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, "new", -1, SQLITE_TRANSIENT);
+
+        if (sqlite3_step(stmt) == SQLITE_DONE) {
+            inserted++;
+        } else {
+            NSLog(@"[Koe] Failed to insert uncertain phrase: %s", sqlite3_errmsg(_db));
+        }
+    }
+
+    sqlite3_finalize(stmt);
+
+    if (inserted > 0) {
+        NSLog(@"[Koe] Stored %ld uncertain phrase candidates", (long)inserted);
+    }
+}
+
+- (NSArray<NSDictionary *> *)pendingUncertainPhrasesWithLimit:(NSInteger)limit {
+    if (!_db) return @[];
+
+    NSInteger effectiveLimit = limit > 0 ? limit : 20;
+    NSString *sql = [NSString stringWithFormat:
+                     @"SELECT id, timestamp, session_id, phrase, suggestion, reason, confidence, context_text, status, corrected_phrase "
+                     "FROM uncertain_phrases "
+                     "WHERE status = 'new' "
+                     "ORDER BY timestamp DESC, id DESC "
+                     "LIMIT %ld;", (long)effectiveLimit];
+
+    sqlite3_stmt *stmt = NULL;
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+
+    if (sqlite3_prepare_v2(_db, sql.UTF8String, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int64_t phraseId = sqlite3_column_int64(stmt, 0);
+            int64_t timestamp = sqlite3_column_int64(stmt, 1);
+
+            const unsigned char *sessionIdC = sqlite3_column_text(stmt, 2);
+            const unsigned char *phraseC = sqlite3_column_text(stmt, 3);
+            const unsigned char *suggestionC = sqlite3_column_text(stmt, 4);
+            const unsigned char *reasonC = sqlite3_column_text(stmt, 5);
+            double confidence = sqlite3_column_double(stmt, 6);
+            const unsigned char *contextC = sqlite3_column_text(stmt, 7);
+            const unsigned char *statusC = sqlite3_column_text(stmt, 8);
+            const unsigned char *correctedC = sqlite3_column_text(stmt, 9);
+
+            NSString *sessionId = sessionIdC ? [NSString stringWithUTF8String:(const char *)sessionIdC] : @"";
+            NSString *phrase = phraseC ? [NSString stringWithUTF8String:(const char *)phraseC] : @"";
+            NSString *suggestion = suggestionC ? [NSString stringWithUTF8String:(const char *)suggestionC] : @"";
+            NSString *reason = reasonC ? [NSString stringWithUTF8String:(const char *)reasonC] : @"";
+            NSString *contextText = contextC ? [NSString stringWithUTF8String:(const char *)contextC] : @"";
+            NSString *status = statusC ? [NSString stringWithUTF8String:(const char *)statusC] : @"";
+            NSString *corrected = correctedC ? [NSString stringWithUTF8String:(const char *)correctedC] : @"";
+
+            NSDictionary *row = @{
+                @"id": @(phraseId),
+                @"timestamp": @(timestamp),
+                @"session_id": sessionId,
+                @"phrase": phrase,
+                @"suggestion": suggestion,
+                @"reason": reason,
+                @"confidence": @(confidence),
+                @"context_text": contextText,
+                @"status": status,
+                @"corrected_phrase": corrected,
+            };
+            [rows addObject:row];
+        }
+    } else {
+        NSLog(@"[Koe] Failed to query pending uncertain phrases: %s", sqlite3_errmsg(_db));
+    }
+
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
+- (void)resolveUncertainPhraseWithId:(NSInteger)phraseId
+                      correctedPhrase:(NSString *)correctedPhrase {
+    if (!_db || phraseId <= 0) return;
+
+    NSString *trimmed = [correctedPhrase stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) return;
+
+    const char *sql = "UPDATE uncertain_phrases SET status = 'resolved', corrected_phrase = ? WHERE id = ?;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, trimmed.UTF8String, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, (sqlite3_int64)phraseId);
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            NSLog(@"[Koe] Failed to resolve uncertain phrase #%ld: %s", (long)phraseId, sqlite3_errmsg(_db));
+        }
+    } else {
+        NSLog(@"[Koe] Failed to prepare resolve uncertain phrase #%ld: %s", (long)phraseId, sqlite3_errmsg(_db));
+    }
+    sqlite3_finalize(stmt);
+}
+
+- (void)ignoreUncertainPhraseWithId:(NSInteger)phraseId {
+    if (!_db || phraseId <= 0) return;
+
+    const char *sql = "UPDATE uncertain_phrases SET status = 'ignored' WHERE id = ?;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, (sqlite3_int64)phraseId);
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            NSLog(@"[Koe] Failed to ignore uncertain phrase #%ld: %s", (long)phraseId, sqlite3_errmsg(_db));
+        }
+    } else {
+        NSLog(@"[Koe] Failed to prepare ignore uncertain phrase #%ld: %s", (long)phraseId, sqlite3_errmsg(_db));
+    }
+    sqlite3_finalize(stmt);
 }
 
 - (void)countText:(NSString *)text charCount:(NSInteger *)outChars wordCount:(NSInteger *)outWords {

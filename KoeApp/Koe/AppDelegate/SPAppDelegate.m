@@ -16,6 +16,8 @@
 @interface SPAppDelegate ()
 @property (nonatomic, strong) NSDate *recordingStartTime;
 @property (nonatomic, assign) time_t lastConfigModTime;
+@property (nonatomic, assign) BOOL isReviewingUncertainPhrases;
+- (void)reviewNextUncertainPhraseInQueue:(NSMutableArray<NSDictionary *> *)queue;
 @end
 
 @implementation SPAppDelegate
@@ -244,6 +246,29 @@
     }
 }
 
+- (void)rustBridgeDidReceiveUncertainPhrasesJSON:(NSString *)payload {
+    if (payload.length == 0) return;
+
+    NSData *data = [payload dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return;
+
+    NSError *error = nil;
+    id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (error) {
+        NSLog(@"[Koe] Failed to parse uncertainty payload JSON: %@", error.localizedDescription);
+        return;
+    }
+    if (![parsed isKindOfClass:[NSArray class]]) {
+        NSLog(@"[Koe] Ignoring uncertainty payload: expected array");
+        return;
+    }
+
+    NSArray *phrases = (NSArray *)parsed;
+    if (phrases.count == 0) return;
+
+    [[SPHistoryManager sharedManager] recordUncertainPhrases:(NSArray<NSDictionary *> *)phrases];
+}
+
 - (void)rustBridgeDidEncounterError:(NSString *)message {
     NSLog(@"[Koe] Session error: %@", message);
     [self.cuePlayer playError];
@@ -323,6 +348,75 @@
 - (void)statusBarDidSelectQuit {
     [self.hotkeyMonitor stop];
     [NSApp terminate:nil];
+}
+
+- (void)statusBarDidSelectReviewUncertainPhrases {
+    if (self.isReviewingUncertainPhrases) {
+        return;
+    }
+
+    NSArray<NSDictionary *> *pending = [[SPHistoryManager sharedManager] pendingUncertainPhrasesWithLimit:20];
+    if (pending.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Pending Phrases";
+        alert.informativeText = @"There are no uncertain phrases waiting for review.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    self.isReviewingUncertainPhrases = YES;
+    [self reviewNextUncertainPhraseInQueue:[pending mutableCopy]];
+}
+
+- (void)reviewNextUncertainPhraseInQueue:(NSMutableArray<NSDictionary *> *)queue {
+    if (queue.count == 0) {
+        self.isReviewingUncertainPhrases = NO;
+        return;
+    }
+
+    NSDictionary *item = queue.firstObject;
+    [queue removeObjectAtIndex:0];
+
+    NSInteger phraseId = [item[@"id"] integerValue];
+    NSString *phrase = [item[@"phrase"] isKindOfClass:[NSString class]] ? item[@"phrase"] : @"";
+    NSString *suggestion = [item[@"suggestion"] isKindOfClass:[NSString class]] ? item[@"suggestion"] : @"";
+    NSString *reason = [item[@"reason"] isKindOfClass:[NSString class]] ? item[@"reason"] : @"";
+    NSString *contextText = [item[@"context_text"] isKindOfClass:[NSString class]] ? item[@"context_text"] : @"";
+    double confidence = [item[@"confidence"] doubleValue];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Review Uncertain Phrase";
+    alert.informativeText = [NSString stringWithFormat:
+                             @"Phrase: %@\nSuggestion: %@\nConfidence: %.2f\nReason: %@\n\nContext:\n%@",
+                             phrase.length > 0 ? phrase : @"(empty)",
+                             suggestion.length > 0 ? suggestion : @"(empty)",
+                             confidence,
+                             reason.length > 0 ? reason : @"(none)",
+                             contextText.length > 0 ? contextText : @"(none)"];
+    [alert addButtonWithTitle:@"Save Correction"];
+    [alert addButtonWithTitle:@"Ignore"];
+    [alert addButtonWithTitle:@"Skip"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 380, 24)];
+    input.placeholderString = @"Enter corrected phrase";
+    input.stringValue = suggestion.length > 0 ? suggestion : phrase;
+    alert.accessoryView = input;
+
+    NSModalResponse response = [alert runModal];
+    if (response == NSAlertFirstButtonReturn) {
+        NSString *corrected = [input.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (corrected.length == 0) {
+            corrected = suggestion.length > 0 ? suggestion : phrase;
+        }
+        if (corrected.length > 0) {
+            [[SPHistoryManager sharedManager] resolveUncertainPhraseWithId:phraseId correctedPhrase:corrected];
+        }
+    } else if (response == NSAlertSecondButtonReturn) {
+        [[SPHistoryManager sharedManager] ignoreUncertainPhraseWithId:phraseId];
+    }
+
+    [self reviewNextUncertainPhraseInQueue:queue];
 }
 
 @end

@@ -36,6 +36,9 @@ pub struct SPCallbacks {
     /// Called for log events
     /// level: 0=error, 1=warn, 2=info, 3=debug
     pub on_log_event: Option<extern "C" fn(level: c_int, message: *const c_char)>,
+    /// Called when uncertain phrase candidates are ready.
+    /// payload is a UTF-8 JSON array string.
+    pub on_uncertain_phrases_ready: Option<extern "C" fn(payload: *const c_char)>,
     /// Called when session state changes (for status bar updates)
     /// state is a UTF-8 C string representing the state name
     pub on_state_changed: Option<extern "C" fn(state: *const c_char)>,
@@ -93,6 +96,16 @@ pub fn invoke_log_event(level: i32, message: &str) {
         if let Some(f) = cbs.on_log_event {
             let c_msg = CString::new(message).unwrap_or_default();
             f(level as c_int, c_msg.as_ptr());
+        }
+    }
+}
+
+pub fn invoke_uncertain_phrases_ready(payload: &str) {
+    let cb = CALLBACKS.lock().unwrap();
+    if let Some(ref cbs) = *cb {
+        if let Some(f) = cbs.on_uncertain_phrases_ready {
+            let c_payload = CString::new(payload).unwrap_or_default();
+            f(c_payload.as_ptr());
         }
     }
 }

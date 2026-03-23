@@ -15,14 +15,15 @@ use crate::asr::{AsrConfig, AsrEvent, AsrProvider};
 use crate::config::Config;
 use crate::ffi::{
     cstr_to_str, invoke_final_text_ready, invoke_session_error, invoke_session_ready,
-    invoke_session_warning, invoke_state_changed, SPCallbacks, SPFeedbackConfig, SPHotkeyConfig, SPSessionContext,
-    SPSessionMode,
+    invoke_session_warning, invoke_state_changed, invoke_uncertain_phrases_ready, SPCallbacks,
+    SPFeedbackConfig, SPHotkeyConfig, SPSessionContext, SPSessionMode,
 };
 use crate::llm::openai_compatible::OpenAiCompatibleProvider;
 use crate::llm::{CorrectionRequest, LlmProvider};
 use crate::session::{Session, SessionState};
 use crate::transcript::TranscriptAggregator;
 
+use serde::{Deserialize, Serialize};
 use std::ffi::c_char;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
@@ -41,6 +42,25 @@ struct Core {
 }
 
 static CORE: Mutex<Option<Core>> = Mutex::new(None);
+
+#[derive(Debug, Serialize)]
+struct UncertainPhraseCandidate {
+    session_id: String,
+    phrase: String,
+    suggestion: String,
+    reason: String,
+    confidence: f64,
+    context_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UncertainPhraseCandidateRaw {
+    phrase: Option<String>,
+    suggestion: Option<String>,
+    reason: Option<String>,
+    confidence: Option<f64>,
+    context_text: Option<String>,
+}
 
 // ─── FFI Entry Points ───────────────────────────────────────────────
 
@@ -479,6 +499,7 @@ async fn run_session(
         }
     }
     invoke_state_changed("correcting");
+    let llm_config_for_uncertain = llm_config.clone();
 
     let final_text = if !llm_config.base_url.is_empty() && !llm_config.api_key.is_empty() {
         let llm = OpenAiCompatibleProvider::new(
@@ -520,12 +541,12 @@ async fn run_session(
             Err(e) => {
                 log::warn!("[{session_id}] LLM failed, falling back to ASR text: {e}");
                 invoke_session_warning(&format!("LLM correction failed: {e}"));
-                asr_text
+                asr_text.clone()
             }
         }
     } else {
         log::info!("[{session_id}] LLM not configured, using raw ASR text");
-        asr_text
+        asr_text.clone()
     };
 
     // Store corrected text
@@ -540,6 +561,47 @@ async fn run_session(
 
     // --- Deliver result to Obj-C ---
     invoke_final_text_ready(&final_text);
+
+    // --- Optional uncertainty extraction (async, non-blocking for paste path) ---
+    if !llm_config_for_uncertain.base_url.is_empty()
+        && !llm_config_for_uncertain.api_key.is_empty()
+        && !interim_history.is_empty()
+    {
+        let session_id_for_uncertain = session_id.clone();
+        let asr_for_uncertain = asr_text.clone();
+        let final_for_uncertain = final_text.clone();
+        let interim_for_uncertain = interim_history.clone();
+
+        tokio::spawn(async move {
+            let candidates = extract_uncertain_phrases_with_llm(
+                &session_id_for_uncertain,
+                &llm_config_for_uncertain,
+                &asr_for_uncertain,
+                &final_for_uncertain,
+                &interim_for_uncertain,
+            )
+            .await;
+
+            if candidates.is_empty() {
+                return;
+            }
+
+            match serde_json::to_string(&candidates) {
+                Ok(payload) => {
+                    log::info!(
+                        "[{session_id_for_uncertain}] uncertainty candidates: {}",
+                        candidates.len()
+                    );
+                    invoke_uncertain_phrases_ready(&payload);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[{session_id_for_uncertain}] failed to serialize uncertainty payload: {e}"
+                    );
+                }
+            }
+        });
+    }
 
     // Session complete
     {
@@ -556,6 +618,149 @@ async fn run_session(
     log::info!("[{session_id}] session completed");
     cleanup_session(&session_arc);
     invoke_state_changed("idle");
+}
+
+async fn extract_uncertain_phrases_with_llm(
+    session_id: &str,
+    llm_config: &config::LlmSection,
+    asr_text: &str,
+    final_text: &str,
+    interim_history: &[String],
+) -> Vec<UncertainPhraseCandidate> {
+    let llm = OpenAiCompatibleProvider::new(
+        llm_config.base_url.clone(),
+        llm_config.api_key.clone(),
+        llm_config.model.clone(),
+        llm_config.temperature,
+        llm_config.top_p,
+        llm_config.max_output_tokens,
+        llm_config.timeout_ms,
+    );
+
+    let request = CorrectionRequest {
+        asr_text: asr_text.to_string(),
+        dictionary_entries: vec![],
+        system_prompt: build_uncertain_system_prompt().to_string(),
+        user_prompt: build_uncertain_user_prompt(asr_text, final_text, interim_history),
+    };
+
+    let raw = match llm.correct(&request).await {
+        Ok(text) => text,
+        Err(e) => {
+            log::warn!("[{session_id}] uncertainty extraction failed: {e}");
+            return vec![];
+        }
+    };
+
+    parse_uncertain_candidates(session_id, final_text, &raw)
+}
+
+fn build_uncertain_system_prompt() -> &'static str {
+    "You extract low-confidence speech-recognition phrases for later user review.
+Return strict JSON only.
+Output format: array of objects with keys:
+- phrase: string (original uncertain phrase)
+- suggestion: string (best correction)
+- reason: string (brief reason)
+- confidence: number between 0 and 1
+- context_text: string (short sentence context)
+No markdown. No extra text."
+}
+
+fn build_uncertain_user_prompt(
+    asr_text: &str,
+    final_text: &str,
+    interim_history: &[String],
+) -> String {
+    let interim_str = interim_history
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("{}. {}", i + 1, t))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "Find up to 8 uncertain phrases that changed across revisions or look suspicious.
+Prefer technical terms, names, APIs, and command words.
+If there are no meaningful uncertain phrases, return [].
+
+ASR text:
+{asr_text}
+
+Final corrected text:
+{final_text}
+
+Interim revisions:
+{interim_str}"
+    )
+}
+
+fn parse_uncertain_candidates(
+    session_id: &str,
+    fallback_context: &str,
+    raw: &str,
+) -> Vec<UncertainPhraseCandidate> {
+    let payload = extract_json_array_fragment(raw).unwrap_or(raw).trim();
+
+    let parsed: Vec<UncertainPhraseCandidateRaw> = if let Ok(items) =
+        serde_json::from_str::<Vec<UncertainPhraseCandidateRaw>>(payload)
+    {
+        items
+    } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+        value
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| serde_json::from_value::<UncertainPhraseCandidateRaw>(v.clone()).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    parsed
+        .into_iter()
+        .filter_map(|item| {
+            let phrase = item.phrase.unwrap_or_default().trim().to_string();
+            if phrase.is_empty() {
+                return None;
+            }
+
+            let suggestion = item
+                .suggestion
+                .unwrap_or_else(|| phrase.clone())
+                .trim()
+                .to_string();
+            let reason = item.reason.unwrap_or_default().trim().to_string();
+            let context_text = item
+                .context_text
+                .unwrap_or_else(|| fallback_context.to_string())
+                .trim()
+                .to_string();
+            let confidence = item.confidence.unwrap_or(0.5).clamp(0.0, 1.0);
+
+            Some(UncertainPhraseCandidate {
+                session_id: session_id.to_string(),
+                phrase,
+                suggestion,
+                reason,
+                confidence,
+                context_text,
+            })
+        })
+        .take(8)
+        .collect()
+}
+
+fn extract_json_array_fragment(text: &str) -> Option<&str> {
+    let start = text.find('[')?;
+    let end = text.rfind(']')?;
+    if end < start {
+        return None;
+    }
+    Some(&text[start..=end])
 }
 
 async fn wait_for_final(

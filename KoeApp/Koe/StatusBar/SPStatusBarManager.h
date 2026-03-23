@@ -5,6 +5,7 @@
 @protocol SPStatusBarDelegate <NSObject>
 @optional
 - (void)statusBarDidSelectReloadConfig;
+- (void)statusBarDidSelectReviewUncertainPhrases;
 - (void)statusBarDidSelectQuit;
 - (void)statusBarMenuDidOpen;
 - (void)statusBarMenuDidClose;

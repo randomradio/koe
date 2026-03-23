@@ -57,6 +57,16 @@ static void bridge_on_log_event(int level, const char *message) {
     NSLog(@"[Koe/Rust][%@] %@", levelStr, msg);
 }
 
+static void bridge_on_uncertain_phrases_ready(const char *payload) {
+    NSString *json = payload ? [NSString stringWithUTF8String:payload] : @"[]";
+    id<SPRustBridgeDelegate> delegate = _bridgeDelegate;
+    if (delegate) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [delegate rustBridgeDidReceiveUncertainPhrasesJSON:json];
+        });
+    }
+}
+
 static void bridge_on_state_changed(const char *state) {
     NSString *stateStr = state ? [NSString stringWithUTF8String:state] : @"unknown";
     id<SPRustBridgeDelegate> delegate = _bridgeDelegate;
@@ -92,6 +102,7 @@ static void bridge_on_state_changed(const char *state) {
         .on_session_warning = bridge_on_session_warning,
         .on_final_text_ready = bridge_on_final_text_ready,
         .on_log_event = bridge_on_log_event,
+        .on_uncertain_phrases_ready = bridge_on_uncertain_phrases_ready,
         .on_state_changed = bridge_on_state_changed,
     };
     sp_core_register_callbacks(callbacks);

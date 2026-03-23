@@ -129,6 +129,12 @@ static const CGFloat kIconSize = 18.0;
     openLogs.target = self;
     [menu addItem:openLogs];
 
+    NSMenuItem *reviewUncertain = [[NSMenuItem alloc] initWithTitle:@"Review Uncertain Phrases..."
+                                                             action:@selector(reviewUncertainPhrases:)
+                                                      keyEquivalent:@""];
+    reviewUncertain.target = self;
+    [menu addItem:reviewUncertain];
+
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *loginItem = [[NSMenuItem alloc] initWithTitle:@"Launch at Login"
@@ -480,6 +486,12 @@ static const CGFloat kIconSize = 18.0;
 - (void)reloadConfig:(id)sender {
     if ([self.delegate respondsToSelector:@selector(statusBarDidSelectReloadConfig)]) {
         [self.delegate statusBarDidSelectReloadConfig];
+    }
+}
+
+- (void)reviewUncertainPhrases:(id)sender {
+    if ([self.delegate respondsToSelector:@selector(statusBarDidSelectReviewUncertainPhrases)]) {
+        [self.delegate statusBarDidSelectReviewUncertainPhrases];
     }
 }
 
